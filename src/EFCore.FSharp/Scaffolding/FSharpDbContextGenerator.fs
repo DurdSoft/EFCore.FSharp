@@ -64,10 +64,11 @@ type FSharpDbContextGenerator
         sb
             |> appendLine "[<DefaultValue>]"
             |> append (sprintf "val mutable private %s : DbSet<%s>" mutableName entityType.Name)
+            |> appendEmptyLine
             |> appendLine (sprintf "member this.%s" dbSetName)
             |> indent
-            |> append (sprintf "with get() = this.%s" mutableName)
-            |> append (sprintf "and set v = this.%s <- v" mutableName)
+            |> append (sprintf "with get() = this.%s " mutableName)
+            |> appendLine (sprintf "and set v = this.%s <- v" mutableName)
             |> unindent
             |> ignore
 
@@ -244,12 +245,10 @@ type FSharpDbContextGenerator
                     concreteKey.DeclaringEntityType.GetProperties()
                     |> Seq.cast<IConventionProperty>
 
-
                 let concreteProperties =
                     KeyDiscoveryConvention.DiscoverKeyProperties(
                         concreteKey.DeclaringEntityType, concreteDeclaringProperties)
                     |> Seq.cast<IProperty>
-
 
                 System.Linq.Enumerable.SequenceEqual(keyProperties, concreteProperties)
             | _ ->
@@ -278,21 +277,23 @@ type FSharpDbContextGenerator
             let explicitName = key.GetName() <> key.GetDefaultName()
             annotations.Remove(RelationalAnnotationNames.Name) |> ignore
 
-            // TODO: guard clause code
             let earlyExit = generateKeyGuardClause key annotations.Values useDataAnnotations explicitName
 
-            let lines = ResizeArray<string>()
-            lines.Add(sprintf ".HasKey(%s)" (generateLambdaToKey key.Properties "e"))
+            if earlyExit then
+                ()
+            else
+                let lines = ResizeArray<string>()
+                lines.Add(sprintf ".HasKey(%s)" (generateLambdaToKey key.Properties "e"))
 
-            if explicitName then
-                lines.Add(sprintf ".HasName(%s)" (code.Literal (key.GetName())))
+                if explicitName then
+                    lines.Add(sprintf ".HasName(%s)" (code.Literal (key.GetName())))
 
-            annotationCodeGenerator.GenerateFluentApiCalls(key, annotations)
-            |> Seq.map code.Fragment
-            |> Seq.append (generateAnnotations annotations.Values)
-            |> lines.AddRange
+                annotationCodeGenerator.GenerateFluentApiCalls(key, annotations)
+                |> Seq.map code.Fragment
+                |> Seq.append (generateAnnotations annotations.Values)
+                |> lines.AddRange
 
-            appendMultiLineFluentApi key.DeclaringEntityType lines sb
+                appendMultiLineFluentApi key.DeclaringEntityType lines sb
 
     let generateTableName (entityType : IEntityType) sb =
 
@@ -301,8 +302,9 @@ type FSharpDbContextGenerator
         let defaultSchema = entityType.Model.GetDefaultSchema()
 
         let explicitSchema = not (isNull schema) && schema <> defaultSchema
-        let explicitTable = explicitSchema || (not (isNull tableName) && tableName <> entityType.GetDbSetName())
+        let explicitTable = explicitSchema || ((isNull tableName |> not) && tableName <> entityType.GetDbSetName())
 
+        printfn $"{entityType.Name} - Explicit table {explicitTable}"
         if explicitTable then
 
             let parameterString =
@@ -314,6 +316,7 @@ type FSharpDbContextGenerator
 
             let lines = ResizeArray<string>()
             lines.Add(sprintf ".ToTable(%s)" parameterString)
+            appendMultiLineFluentApi entityType lines sb
 
             let viewName = entityType.GetViewName()
             let viewSchema = entityType.GetViewSchema()
@@ -325,6 +328,7 @@ type FSharpDbContextGenerator
                 let parameterString =
                     if explicitViewSchema then $"{code.Literal(viewName)}, {code.Literal(viewSchema)}" else code.Literal(viewName)
 
+                let lines = ResizeArray<string>()
                 lines.Add($".ToView({parameterString})")
 
                 appendMultiLineFluentApi entityType lines sb
@@ -497,6 +501,8 @@ type FSharpDbContextGenerator
             annotationCodeGenerator.FilterIgnoredAnnotations(entityType.GetAnnotations())
             |> annotationsToDictionary
 
+        annotationCodeGenerator.RemoveAnnotationsHandledByConventions(entityType, annotations)
+
         seq {
             RelationalAnnotationNames.TableName
             RelationalAnnotationNames.Schema
@@ -510,7 +516,7 @@ type FSharpDbContextGenerator
             annotationCodeGenerator.GenerateDataAnnotationAttributes(entityType, annotations)
             |> ignore
 
-        if not useDataAnnotations || entityType.GetViewName() |> isNull |> not then
+        if (not useDataAnnotations) || (entityType.GetViewName() |> isNull |> not) then
             sb |> generateTableName entityType
 
         sb |> appendMultiLineFluentApi entityType (linesFromAnnotations annotations.Values entityType)
